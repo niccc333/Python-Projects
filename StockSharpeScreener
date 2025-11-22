@@ -1,0 +1,126 @@
+import yfinance as yf
+import numpy as np
+import pandas as pd
+from datetime import datetime
+
+def get_user_input():
+    """
+    Handles user input for tickers and dates.
+    """
+    print("--- Sharpe Ratio Calculator ---")
+    
+    # Get tickers
+    tickers_input = input("Enter tickers separated by ', ' (e.g., AAPL, MSFT, GOOG): ")
+    tickers = [t.strip().upper() for t in tickers_input.split(',')]
+    
+    # Get dates
+    while True:
+        try:
+            start_date_str = input("Enter start date (YYYY-MM-DD): ")
+            datetime.strptime(start_date_str, '%Y-%m-%d') # Validate format
+            break
+        except ValueError:
+            print("Invalid format. Please use YYYY-MM-DD.")
+
+    while True:
+        try:
+            end_date_str = input("Enter end date (YYYY-MM-DD): ")
+            datetime.strptime(end_date_str, '%Y-%m-%d') # Validate format
+            if end_date_str <= start_date_str:
+                print("End date must be after start date.")
+                continue
+            break
+        except ValueError:
+            print("Invalid format. Please use YYYY-MM-DD.")
+            
+    return tickers, start_date_str, end_date_str
+
+def calculate_sharpe_ratio(data, risk_free_rate=0.0):
+    """
+    Calculates the annualized Sharpe Ratio.
+    
+    Args:
+        data (pd.Series): Daily adjusted close prices.
+        risk_free_rate (float): Annual risk-free rate (decimal). Default is 0.
+        
+    Returns:
+        float: Annualized Sharpe Ratio.
+    """
+    # Calculate daily returns
+    daily_returns = data.pct_change().dropna()
+    
+    # Calculate Mean Daily Return and Standard Deviation of Daily Returns
+    avg_daily_return = daily_returns.mean()
+    std_dev_daily_return = daily_returns.std()
+    
+    # Adjust risk-free rate to daily
+    # Assuming 252 trading days
+    daily_rf_rate = risk_free_rate / 252
+    
+    # Calculate Daily Sharpe Ratio
+    if std_dev_daily_return == 0:
+        return 0.0
+        
+    daily_sharpe = (avg_daily_return - daily_rf_rate) / std_dev_daily_return
+    
+    # Annualize the Sharpe Ratio (multiply by sqrt(252))
+    annualized_sharpe = daily_sharpe * np.sqrt(252)
+    
+    return annualized_sharpe
+
+def main():
+    tickers, start_date, end_date = get_user_input()
+    
+    risk_free_rate_input = input("Enter annual risk-free rate as a decimal (default 0.02 for 2%, press Enter for default): ")
+    try:
+        risk_free_rate = float(risk_free_rate_input) if risk_free_rate_input else 0.02
+    except ValueError:
+        print("Invalid number. Using default 0.02")
+        risk_free_rate = 0.02
+
+    print(f"\nFetching data from {start_date} to {end_date}...")
+    
+    results = []
+    
+    for ticker in tickers:
+        try:
+            # Download data
+            data = yf.download(ticker, start=start_date, end=end_date, progress=False)
+            
+            if data.empty:
+                print(f"No data found for {ticker}. Skipping.")
+                continue
+            
+            # Use 'Adj Close' for calculations to account for dividends/splits
+            # Note: yfinance structure can vary slightly by version, checking for column
+            if 'Adj Close' in data.columns:
+                prices = data['Adj Close']
+            elif 'Close' in data.columns:
+                prices = data['Close']
+            else:
+                print(f"Could not find closing price data for {ticker}.")
+                continue
+
+            # Handle multi-index columns if they exist (common in newer yfinance versions for single tickers)
+            if isinstance(prices, pd.DataFrame):
+                prices = prices.squeeze()
+
+            sharpe = calculate_sharpe_ratio(prices, risk_free_rate)
+            results.append({'Ticker': ticker, 'Sharpe Ratio': sharpe})
+            
+        except Exception as e:
+            print(f"Error processing {ticker}: {e}")
+
+    # Display Results
+    if results:
+        df_results = pd.DataFrame(results)
+        df_results.sort_values(by='Sharpe Ratio', ascending=False, inplace=True)
+        
+        print("\n--- Results (Sorted by Sharpe Ratio) ---")
+        print(df_results.to_string(index=False))
+        print(f"\n*Risk-Free Rate used: {risk_free_rate*100}%")
+    else:
+        print("\nNo results to display.")
+
+if __name__ == "__main__":
+    main()
