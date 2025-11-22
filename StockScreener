@@ -8,14 +8,15 @@ import warnings
 
 # --- SILENCE WARNINGS ---
 warnings.simplefilter(action='ignore', category=FutureWarning)
-warnings.simplefilter(action='ignore', category=UserWarning) # Silence yfinance 'no data' warnings if any
+warnings.simplefilter(action='ignore', category=UserWarning)
 
 # --- CONFIGURATION ---
 TICKERS = [
-    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "TSLA", "META", "JPM", "V", 
-    "JNJ", "WMT", "PG", "XOM", "MA", "HD", "CVX", "MRK", "KO", "PEP", "ABBV"
+    "AMZN", "AAPL", "MSFT", "GOOGL", "META", "TSLA", "NVDA", "JPM", "V", "JNJ",
+    "WMT", "PG", "DIS", "MA", "HD", "BAC", "XOM", "PFE", "KO", "CSCO", "ADBE",
+    "NFLX", "INTC", "CMCSA", "T", "PEP", "ABNB", "CRM", "ORCL", "COST", "NKE"
 ]
-# Using SGOV as the risk-free proxy (0-3 Month Treasuries)
+
 RISK_FREE_TICKER = "SGOV"
 
 START_DATE = (datetime.now() - timedelta(days=365*4)).strftime("%Y-%m-%d") 
@@ -35,16 +36,16 @@ def get_financial_factors(ticker):
     fund_df = fund_df.sort_index()
     
     # --- CALC FACTORS ---
+    
     # 1. Change Sales minus Change Inventory (scaled by Assets)
     try:
         rev = fund_df['Total Revenue'] if 'Total Revenue' in fund_df else fund_df['TotalRevenue']
         inv = fund_df['Inventory'] if 'Inventory' in fund_df else pd.Series(0, index=fund_df.index)
         assets = fund_df['Total Assets'] if 'Total Assets' in fund_df else fund_df['TotalAssets']
+        assets_lag = assets.shift(1)
         
         d_sales = rev.diff()
         d_inv = inv.diff()
-        assets_lag = assets.shift(1)
-        
         fund_df['F_Sales_Inv'] = (d_sales - d_inv) / assets_lag
     except:
         fund_df['F_Sales_Inv'] = np.nan
@@ -56,56 +57,48 @@ def get_financial_factors(ticker):
         fund_df['F_OCF'] = d_ocf / assets_lag
     except:
         fund_df['F_OCF'] = np.nan
+
+    # 3. Tax Expense Surprise (RESTORED)
+    # Change in Tax Provision / Assets
+    try:
+        tax = fund_df['Tax Provision'] if 'Tax Provision' in fund_df else fund_df['TaxProvision']
+        d_tax = tax.diff()
+        fund_df['F_Tax_Surprise'] = d_tax / assets_lag
+    except:
+        fund_df['F_Tax_Surprise'] = np.nan
         
-    return fund_df[['F_Sales_Inv', 'F_OCF']]
+    return fund_df[['F_Sales_Inv', 'F_OCF', 'F_Tax_Surprise']]
 
 def get_risk_free_returns():
-    """Fetches SGOV data to calculate monthly risk-free returns."""
-    print(f"Fetching Risk-Free Rate ({RISK_FREE_TICKER})...")
     try:
-        # We need 'Adj Close' because it accounts for the monthly dividend payments (Yield)
         rf_df = yf.download(RISK_FREE_TICKER, start=START_DATE, end=END_DATE, progress=False, auto_adjust=False)
-        
-        # Handle potential MultiIndex
         if isinstance(rf_df.columns, pd.MultiIndex):
-            try:
-                rf_df = rf_df.xs(RISK_FREE_TICKER, level=1, axis=1)
-            except KeyError:
-                 rf_df = rf_df.iloc[:, :5]
+            try: rf_df = rf_df.xs(RISK_FREE_TICKER, level=1, axis=1)
+            except: rf_df = rf_df.iloc[:, :5]
 
         col_name = 'Adj Close' if 'Adj Close' in rf_df.columns else 'Close'
         rf_monthly = rf_df[[col_name]].resample('ME').last()
-        
-        # Calculate Monthly Return (This is our Rf)
-        rf_monthly['Rf'] = rf_monthly[col_name].pct_change().shift(-1) # Shift to match Target Return timing
+        rf_monthly['Rf'] = rf_monthly[col_name].pct_change().shift(-1)
         return rf_monthly[['Rf']]
-    except Exception as e:
-        print(f"Error fetching Risk Free Rate: {e}")
+    except:
         return pd.DataFrame()
 
 def build_dataset(tickers):
-    # 1. Get Risk Free Rate
     rf_df = get_risk_free_returns()
-    if rf_df.empty:
-        print("Could not fetch Risk Free Rate. Using 0.0 as fallback.")
-        rf_df = pd.DataFrame(columns=['Rf'])
+    if rf_df.empty: rf_df = pd.DataFrame(columns=['Rf'])
 
-    print("Building Panel Dataset...")
+    print(f"Building Panel Dataset for {len(tickers)} tickers...")
     panel_data = []
     
     for t in tickers:
         try:
-            # A. Get Monthly Prices
             df_price = yf.download(t, start=START_DATE, end=END_DATE, progress=False, auto_adjust=False)
             if df_price.empty: continue
             
             if isinstance(df_price.columns, pd.MultiIndex):
-                try:
-                    df_price = df_price.xs(t, level=1, axis=1)
-                except KeyError:
-                    df_price = df_price.iloc[:, :5]
+                try: df_price = df_price.xs(t, level=1, axis=1)
+                except: df_price = df_price.iloc[:, :5]
             
-            # Select Price Column
             price_col = 'Adj Close' if 'Adj Close' in df_price.columns else 'Close'
             df_price = df_price[[price_col]]
             df_price.columns = ['Close']
@@ -113,18 +106,14 @@ def build_dataset(tickers):
             df_m = df_price.resample('ME').last()
             
             # --- PRICE FACTORS ---
-            # 1. INVERTED Price to 52-Week High
-            # Original: Price / High. Inverted: -1 * (Price / High) 
-            # Explanation: Low Price/High ratio = "Buy the Dip". 
-            # By multiplying by -1, a "Low Ratio" becomes a "Less Negative" (Higher) number.
-            # This aligns the Z-Score so Higher Score = Better Buy.
+            
+            # 1. INVERTED Price to 52-Week High (Buy the Dip)
             rolling_max = df_price['Close'].rolling(252).max()
             rolling_max_monthly = rolling_max.resample('ME').last()
-            
-            # Calculate Raw Ratio
-            ratio = df_m['Close'] / rolling_max_monthly
-            # Invert logic for the Factor
-            df_m['F_Price_High_Inv'] = ratio * -1 
+            df_m['F_Price_High_Inv'] = (df_m['Close'] / rolling_max_monthly) * -1 
+
+            # 2. Momentum (t-1 to t-9) (RESTORED)
+            df_m['F_Momentum'] = (df_m['Close'].shift(1) / df_m['Close'].shift(9)) - 1
 
             # B. Get Fundamental Factors
             df_fund = get_financial_factors(t)
@@ -136,59 +125,47 @@ def build_dataset(tickers):
                 df_final = df_final.ffill(limit=12)
             else:
                 df_final = df_m
-                df_final['F_Sales_Inv'] = np.nan
-                df_final['F_OCF'] = np.nan
+                df_final[['F_Sales_Inv', 'F_OCF', 'F_Tax_Surprise']] = np.nan
 
-            # C. Target Variable: Excess Return
-            # Raw Return
+            # C. Target: Excess Return
             df_final['Raw_Ret'] = df_final['Close'].pct_change().shift(-1)
-            
-            # Join with SGOV Risk Free Rate
             df_final = df_final.join(rf_df, how='left')
-            
-            # Calculate Excess Return (Stock Return - SGOV Return)
-            # If SGOV data missing, assume 0 risk free
             df_final['Rf'] = df_final['Rf'].fillna(0.0)
             df_final['Excess_Ret'] = df_final['Raw_Ret'] - df_final['Rf']
             
             df_final['Ticker'] = t
             df_final = df_final.reset_index()
-            if 'Date' not in df_final.columns:
-                df_final = df_final.rename(columns={'index': 'Date'})
+            if 'Date' not in df_final.columns: df_final = df_final.rename(columns={'index': 'Date'})
             
             panel_data.append(df_final)
             
-        except Exception as e:
+        except:
             continue
 
     return pd.concat(panel_data).dropna()
 
 def run_refined_regression():
     df = build_dataset(TICKERS)
-    
-    if df.empty:
-        print("No data collected.")
-        return
+    if df.empty: return
 
-    # FACTORS TO TEST
-    factor_cols = ['F_Price_High_Inv', 'F_Sales_Inv', 'F_OCF']
+    # Updated Factor List
+    factor_cols = ['F_Price_High_Inv', 'F_Sales_Inv', 'F_OCF', 'F_Momentum', 'F_Tax_Surprise']
     
-    # 1. Normalize Factors (Z-Score per month)
+    # Normalize
     for col in factor_cols:
         df[col] = df.groupby('Date')[col].transform(lambda x: (x - x.mean()) / x.std())
     
     df = df.dropna()
 
-    # 2. Run Fama-MacBeth
     r_squared_values = []
     coefficients = []
     
-    print(f"\nRunning Regression on {len(df)} observations (Excess Returns vs SGOV)...")
+    print(f"\nRunning Regression on {len(df)} observations...")
     
     for date, group in df.groupby('Date'):
-        if len(group) < 5: continue 
+        if len(group) < 8: continue # Need enough data for 5 factors
         
-        Y = group['Excess_Ret'] # Using Excess Return now
+        Y = group['Excess_Ret']
         X = group[factor_cols]
         X = sm.add_constant(X)
         
@@ -207,36 +184,24 @@ def run_refined_regression():
 
     avg_r2 = np.mean(r_squared_values)
     
-    # 3. Calculate Stats (including P-Value)
     coeff_df = pd.DataFrame(coefficients).set_index('Date')
     stats_df = pd.DataFrame()
     
-    # A. Premium (Slope)
     stats_df['Premium'] = coeff_df[factor_cols].mean()
-    
-    # B. Standard Error
-    # SE = StdDev / sqrt(N)
     se = coeff_df[factor_cols].std() / np.sqrt(len(coeff_df))
-    
-    # C. T-Stat
     stats_df['t-stat'] = stats_df['Premium'] / se
     
-    # D. P-Value (Two-tailed)
-    # p = 2 * (1 - cdf(|t|))
     df_resid = len(coeff_df) - 1
     stats_df['p-value'] = 2 * (1 - stats.t.cdf(np.abs(stats_df['t-stat']), df=df_resid))
     
-    # E. Formatting
     pd.set_option('display.float_format', '{:.6f}'.format)
     
     print("\n" + "="*70)
-    print(f"REFINED MODEL PERFORMANCE (Avg Adj R-Squared): {avg_r2:.4f} ({avg_r2*100:.2f}%)")
+    print(f"FULL MODEL PERFORMANCE (Avg Adj R-Squared): {avg_r2:.4f} ({avg_r2*100:.2f}%)")
     print("="*70)
-    print("\nFACTOR SIGNIFICANCE (Target: Excess Return over SGOV):")
+    print("\nFACTOR SIGNIFICANCE (Target: Excess Return vs SGOV):")
     print(stats_df)
     print("-" * 70)
-    print("* F_Price_High_Inv: Higher value means stock is DEEPER in a dip (Reversal).")
-    print("* p-value < 0.05 indicates statistical significance (95% confidence).")
 
 if __name__ == "__main__":
     run_refined_regression()
