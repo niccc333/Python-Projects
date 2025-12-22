@@ -6,7 +6,8 @@ from scipy import stats
 from datetime import datetime, timedelta
 import warnings
 
-# --- REMOVED BROKEN IMPORT (pandas_datareader) ---
+ # all factors taken from the global factor study listed below:
+ # https://jkpfactors.com/
 
 # --- SILENCE WARNINGS ---
 warnings.simplefilter(action='ignore', category=FutureWarning)
@@ -21,8 +22,9 @@ TICKERS = [
 ]
 
 # "BIL" is the SPDR Bloomberg 1-3 Month T-Bill ETF. 
+# "SGOV" is the iShares 0-3 Month Treasury Bond ETF.
 # It is the standard tradable proxy for the Risk-Free Rate.
-RISK_FREE_TICKER = "BIL" 
+RISK_FREE_TICKER = "SGOV" 
 
 START_DATE = (datetime.now() - timedelta(days=365*4)).strftime("%Y-%m-%d") 
 END_DATE = datetime.now().strftime("%Y-%m-%d")
@@ -40,9 +42,18 @@ def get_financial_factors(ticker):
     fund_df.index = pd.to_datetime(fund_df.index)
     fund_df = fund_df.sort_index()
     
-    # --- CALC FACTORS ---
-    
+        # --- FACTORS ---
+            
+    # Fator List:
+    # 1 F_Sales_Inv: Change in Sales minus Change in Inventory (scaled by Assets)
+    # 2 F_Price_High_Inv: Inverted Price to 52-Week High
+    # 3 F_Momentum: Price Momentum (t-1 to t-9)
+    # 4 F_Tax_Surprise: Change in Tax Expense scaled by Assets
+    # 6 F_OCF: Change in Operating Cash Flow scaled by Assets
+
+
     # 1. Change Sales minus Change Inventory (scaled by Assets)
+    # Logic: A higher value indicates sales are outpacing inventory buildup (Bullish signal).
     try:
         rev = fund_df['Total Revenue'] if 'Total Revenue' in fund_df else fund_df['TotalRevenue']
         inv = fund_df['Inventory'] if 'Inventory' in fund_df else pd.Series(0, index=fund_df.index)
@@ -55,7 +66,8 @@ def get_financial_factors(ticker):
     except:
         fund_df['F_Sales_Inv'] = np.nan
 
-    # 2. Change in Operating Cash Flow / Assets
+    # 6. Change in Operating Cash Flow / Assets
+    #Logic: Measures the acceleration of cash generation. Increasing cash flow relative to the firm's asset base is generally a strong quality signal.
     try:
         ocf = fund_df['Operating Cash Flow'] if 'Operating Cash Flow' in fund_df else fund_df['TotalCashFromOperatingActivities']
         d_ocf = ocf.diff()
@@ -63,7 +75,9 @@ def get_financial_factors(ticker):
     except:
         fund_df['F_OCF'] = np.nan
 
-    # 3. Tax Expense Surprise (RESTORED)
+    # 3. Tax Expense Surprise
+    # Logic: An increase in tax expense often implies higher taxable income, which can be a proxy for genuine profitability that is harder to manipulate than Net Income.
+    # I think it is catching firms that are being made to pay more taxes because of legislation -> lower margins -> bad
     try:
         tax = fund_df['Tax Provision'] if 'Tax Provision' in fund_df else fund_df['TaxProvision']
         d_tax = tax.diff()
@@ -97,7 +111,7 @@ def build_dataset(tickers):
     rf_df = get_risk_free_returns()
     if rf_df.empty: rf_df = pd.DataFrame(columns=['Rf'])
 
-    print(f"Building Panel Dataset for {len(tickers)} tickers...")
+    print(f"Building Panel Dataset for {len(tickers)} tickers (might take a while)...")
     panel_data = []
     
     for t in tickers:
@@ -115,17 +129,22 @@ def build_dataset(tickers):
 
             df_m = df_price.resample('ME').last()
             
-            # --- PRICE FACTORS ---
-            
-            # 1. INVERTED Price to 52-Week High (Buy the Dip)
+ 
+
+            # 2. INVERTED Price to 52-Week High (Buy the Dip)
+            # Logic: Compares current price to the 52-week high.
+            # Multiplying by -1 "inverts" it: stocks furthest from their high (the "dip") 
+            # get higher scores in this specific model's logic.
             rolling_max = df_price['Close'].rolling(252).max()
             rolling_max_monthly = rolling_max.resample('ME').last()
             df_m['F_Price_High_Inv'] = (df_m['Close'] / rolling_max_monthly) * -1 
 
-            # 2. Momentum (t-1 to t-9)
+            # 3. Momentum (t-1 to t-9)
+            # Logic: Standard "short-term" momentum. 
+            # It measures the return from 9 months ago to 1 month ago.
+            # We shift(1) to avoid "short-term reversal" (the tendency for last week's winners to dip). 
             df_m['F_Momentum'] = (df_m['Close'].shift(1) / df_m['Close'].shift(9)) - 1
 
-            # B. Get Fundamental Factors
             df_fund = get_financial_factors(t)
             
             if df_fund is not None:
@@ -155,12 +174,12 @@ def build_dataset(tickers):
     return pd.concat(panel_data).dropna()
 
 def run_refined_regression():
+    # Cross-sectional normalization to prevent outliers from skewing results
     df = build_dataset(TICKERS)
     if df.empty: return
 
     factor_cols = ['F_Price_High_Inv', 'F_Sales_Inv', 'F_OCF', 'F_Momentum', 'F_Tax_Surprise']
     
-    # Normalize
     for col in factor_cols:
         df[col] = df.groupby('Date')[col].transform(lambda x: (x - x.mean()) / x.std())
     
@@ -211,6 +230,7 @@ def run_refined_regression():
     print(f"Risk-Free Ticker Used: {RISK_FREE_TICKER} from {START_DATE} to {END_DATE}")
     print(stats_df)
     print("-" * 70)
+    
 
 if __name__ == "__main__":
     run_refined_regression()
