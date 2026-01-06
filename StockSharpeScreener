@@ -51,7 +51,7 @@ def get_earnings_analysis(tickers):
             # We add a buffer to start_date to ensure we have the T-1 price
             price_history = ticker.history(start=start_date - timedelta(days=10), end=end_date)
             price_history.index = price_history.index.tz_localize(None) # Make naive
-            
+            print("printing surprise earnings...")
             surprises = []
             price_changes = []
 
@@ -70,7 +70,6 @@ def get_earnings_analysis(tickers):
                         surprise = (actual - est) / abs(est)
 
                 # Debug: print each earnings surprise instance for inspection
-                print("printing specific surprise values...")
                 try:
                     print(f"{ticker_symbol} {date.date()} surprise: {surprise}")
                 except Exception:
@@ -149,7 +148,7 @@ def get_earnings_analysis(tickers):
 # --- MAIN EXECUTION ---
 if __name__ == "__main__":
     # Input your tickers here
-    my_tickers = ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA']
+    my_tickers = ['psmt', 'tsm', 'ibkr', 'stx', 'nflx', 'sofi', 'sap', 'lmt', 'asml', 'meta', 'pltr', 'amd', 'amzn', 'nvda', 'msft', 'orcl', 'air', 'jpm', 'bac', 'c', 'wfc', 'gs', 'ms', 'tsla', 'mtb', 'blk', 'wabc']
     
     df = get_earnings_analysis(my_tickers)
     
