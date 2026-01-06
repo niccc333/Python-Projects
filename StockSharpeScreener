@@ -1,126 +1,143 @@
 import yfinance as yf
-import numpy as np
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, timedelta
+import numpy as np
 
-def get_user_input():
+def get_earnings_analysis(tickers):
     """
-    Handles user input for tickers and dates.
+    Analyzes earnings surprise and price reaction for a list of tickers 
+    over the last 2 years.
+    
+    Metrics:
+    - Average Earnings Surprise (%): (Actual - Est) / Abs(Est)
+    - Average Price Change (%): HPR from 1 day before to 2 days after earnings.
     """
-    print("--- Sharpe Ratio Calculator ---")
-    
-    # Get tickers
-    tickers_input = input("Enter tickers separated by ', ' (e.g., AAPL, MSFT, GOOG): ")
-    tickers = [t.strip().upper() for t in tickers_input.split(',')]
-    
-    # Get dates
-    while True:
-        try:
-            start_date_str = input("Enter start date (YYYY-MM-DD): ")
-            datetime.strptime(start_date_str, '%Y-%m-%d') # Validate format
-            break
-        except ValueError:
-            print("Invalid format. Please use YYYY-MM-DD.")
-
-    while True:
-        try:
-            end_date_str = input("Enter end date (YYYY-MM-DD): ")
-            datetime.strptime(end_date_str, '%Y-%m-%d') # Validate format
-            if end_date_str <= start_date_str:
-                print("End date must be after start date.")
-                continue
-            break
-        except ValueError:
-            print("Invalid format. Please use YYYY-MM-DD.")
-            
-    return tickers, start_date_str, end_date_str
-
-def calculate_sharpe_ratio(data, risk_free_rate=0.0):
-    """
-    Calculates the annualized Sharpe Ratio.
-    
-    Args:
-        data (pd.Series): Daily adjusted close prices.
-        risk_free_rate (float): Annual risk-free rate (decimal). Default is 0.
-        
-    Returns:
-        float: Annualized Sharpe Ratio.
-    """
-    # Calculate daily returns
-    daily_returns = data.pct_change().dropna()
-    
-    # Calculate Mean Daily Return and Standard Deviation of Daily Returns
-    avg_daily_return = daily_returns.mean()
-    std_dev_daily_return = daily_returns.std()
-    
-    # Adjust risk-free rate to daily
-    # Assuming 252 trading days
-    daily_rf_rate = risk_free_rate / 252
-    
-    # Calculate Daily Sharpe Ratio
-    if std_dev_daily_return == 0:
-        return 0.0
-        
-    daily_sharpe = (avg_daily_return - daily_rf_rate) / std_dev_daily_return
-    
-    # Annualize the Sharpe Ratio (multiply by sqrt(252))
-    annualized_sharpe = daily_sharpe * np.sqrt(252)
-    
-    return annualized_sharpe
-
-def main():
-    tickers, start_date, end_date = get_user_input()
-    
-    risk_free_rate_input = input("Enter annual risk-free rate as a decimal (default 0.02 for 2%, press Enter for default): ")
-    try:
-        risk_free_rate = float(risk_free_rate_input) if risk_free_rate_input else 0.02
-    except ValueError:
-        print("Invalid number. Using default 0.02")
-        risk_free_rate = 0.02
-
-    print(f"\nFetching data from {start_date} to {end_date}...")
     
     results = []
     
-    for ticker in tickers:
+    # Define time window (2 years ago to today)
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=730)
+    
+    print(f"Analyzing {len(tickers)} tickers... this may take a moment.")
+    print("-" * 60)
+
+    for ticker_symbol in tickers:
         try:
-            # Download data
-            data = yf.download(ticker, start=start_date, end=end_date, progress=False)
+            # 1. Fetch Ticker Object
+            ticker = yf.Ticker(ticker_symbol)
             
-            if data.empty:
-                print(f"No data found for {ticker}. Skipping.")
-                continue
+            # 2. Get Earnings Dates (Limit 20 covers >2 years of quarterly reports)
+            # This returns a DataFrame with columns like 'EPS Estimate', 'Reported EPS', 'Surprise(%)'
+            earnings = ticker.get_earnings_dates(limit=24)
             
-            # Use 'Adj Close' for calculations to account for dividends/splits
-            # Note: yfinance structure can vary slightly by version, checking for column
-            if 'Adj Close' in data.columns:
-                prices = data['Adj Close']
-            elif 'Close' in data.columns:
-                prices = data['Close']
-            else:
-                print(f"Could not find closing price data for {ticker}.")
+            if earnings is None or earnings.empty:
+                print(f"Skipping {ticker_symbol}: No earnings dates found.")
                 continue
 
-            # Handle multi-index columns if they exist (common in newer yfinance versions for single tickers)
-            if isinstance(prices, pd.DataFrame):
-                prices = prices.squeeze()
-
-            sharpe = calculate_sharpe_ratio(prices, risk_free_rate)
-            results.append({'Ticker': ticker, 'Sharpe Ratio': sharpe})
+            # Filter for last 2 years only
+            # Note: Index is usually timezone-aware, we convert to naive for comparison
+            earnings.index = earnings.index.tz_localize(None) 
+            earnings = earnings[(earnings.index >= start_date) & (earnings.index <= end_date)]
             
+            # Remove rows where Reported EPS is missing (future dates)
+            earnings = earnings.dropna(subset=['Reported EPS'])
+            
+            if earnings.empty:
+                print(f"Skipping {ticker_symbol}: No earnings in the last 2 years.")
+                continue
+
+            # 3. Fetch Price History for the full window to minimize API calls
+            # We add a buffer to start_date to ensure we have the T-1 price
+            price_history = ticker.history(start=start_date - timedelta(days=10), end=end_date)
+            price_history.index = price_history.index.tz_localize(None) # Make naive
+            
+            surprises = []
+            price_changes = []
+
+            for date, row in earnings.iterrows():
+                # Extract Earnings Surprise
+                # Prefer 'Surprise(%)' column if exists, else calculate
+                if 'Surprise(%)' in earnings.columns and not pd.isna(row['Surprise(%)']):
+                    surprise = row['Surprise(%)']
+                else:
+                    # Manual Calculation: (Actual - Est) / |Est|
+                    est = row['EPS Estimate']
+                    actual = row['Reported EPS']
+                    if pd.isna(est) or est == 0:
+                        surprise = np.nan
+                    else:
+                        surprise = (actual - est) / abs(est)
+
+                # Calculate Price Change (T-1 to T+2)
+                # We interpret "days" as trading days. 
+                # We find the location of the earnings date in the price history.
+                
+                # Check if exact date exists in price history (it might be a weekend/holiday)
+                # If not, roll forward to the next trading day for the 'Announcement' reference
+                try:
+                    # Get integer location of the closest date >= earnings date
+                    idx = price_history.index.searchsorted(date)
+                    
+                    if idx >= len(price_history):
+                        continue # Date is too recent, no price data yet
+                        
+                    # Define indices for T-1 and T+2 relative to the announcement trading day
+                    idx_start = idx - 1
+                    idx_end = idx + 2
+                    
+                    # Ensure indices are within bounds
+                    if idx_start < 0 or idx_end >= len(price_history):
+                        continue
+
+                    price_before = price_history.iloc[idx_start]['Close']
+                    price_after = price_history.iloc[idx_end]['Close']
+                    
+                    # Holding Period Return
+                    hpr = (price_after - price_before) / price_before
+                    
+                    surprises.append(surprise)
+                    price_changes.append(hpr)
+                    
+                except Exception as e:
+                    continue
+
+            # 4. Compute Averages
+            if surprises and price_changes:
+                avg_surprise = np.nanmean(surprises)
+                # Convert decimal to percentage for display (e.g., 0.05 -> 5.0%)
+                avg_price_change = np.nanmean(price_changes) 
+                
+                results.append({
+                    "Ticker": ticker_symbol,
+                    "Avg Earnings Surprise": avg_surprise, # Already in % if from YF, or decimal if calc'd
+                    "Avg Price Change (T-1 to T+2)": avg_price_change
+                })
+
         except Exception as e:
-            print(f"Error processing {ticker}: {e}")
+            print(f"Error processing {ticker_symbol}: {e}")
 
-    # Display Results
-    if results:
-        df_results = pd.DataFrame(results)
-        df_results.sort_values(by='Sharpe Ratio', ascending=False, inplace=True)
+    # 5. Create Final DataFrame
+    df_results = pd.DataFrame(results)
+    
+    # Formatting for cleaner output
+    if not df_results.empty:
+        # Standardize Surprise: If YF gave decimals (0.10), make %, if it gave whole numbers (10), keep.
+        # usually YF 'Surprise(%)' is e.g. 0.05 for 5%. We will assume decimals for calculation consistency.
         
-        print("\n--- Results (Sorted by Sharpe Ratio) ---")
-        print(df_results.to_string(index=False))
-        print(f"\n*Risk-Free Rate used: {risk_free_rate*100}%")
-    else:
-        print("\nNo results to display.")
+        # Display as percentages strings
+        pd.options.display.float_format = '{:.2%}'.format
+    
+    return df_results
 
+# --- MAIN EXECUTION ---
 if __name__ == "__main__":
-    main()
+    # Input your tickers here
+    my_tickers = ['AAPL', 'MSFT', 'GOOGL', 'TSLA', 'NVDA']
+    
+    df = get_earnings_analysis(my_tickers)
+    
+    print("\n" + "="*50)
+    print("EARNINGS IMPACT ANALYSIS (LAST 2 YEARS)")
+    print("="*50)
+    print(df.to_string(index=False))
