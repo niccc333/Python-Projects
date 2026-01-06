@@ -69,6 +69,22 @@ def get_earnings_analysis(tickers):
                     else:
                         surprise = (actual - est) / abs(est)
 
+                # Debug: print each earnings surprise instance for inspection
+                print("printing specific surprise values...")
+                try:
+                    print(f"{ticker_symbol} {date.date()} surprise: {surprise}")
+                except Exception:
+                    # Defensive: ensure printing errors don't break the loop
+                    print(f"{ticker_symbol} {date} surprise: <unprintable>")
+                else:
+                    # Manual Calculation: (Actual - Est) / |Est|
+                    est = row['EPS Estimate']
+                    actual = row['Reported EPS']
+                    if pd.isna(est) or est == 0:
+                        surprise = np.nan
+                    else:
+                        surprise = (actual - est) / abs(est)
+
                 # Calculate Price Change (T-1 to T+2)
                 # We interpret "days" as trading days. 
                 # We find the location of the earnings date in the price history.
