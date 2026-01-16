@@ -152,7 +152,7 @@ if __name__ == "__main__":
     
     df = get_earnings_analysis(my_tickers)
     
-    print("\n" + "="*50)
+    print("\n" + "="*51)
     print("EARNINGS IMPACT ANALYSIS (LAST 2 YEARS)")
-    print("="*50)
+    print("="*51)
     print(df.to_string(index=False))
